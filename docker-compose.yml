@@ -1,0 +1,53 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: logseq-web:local
+    container_name: logseq-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  db-sync:
+    profiles:
+      - sync
+    image: clojure:temurin-11-tools-deps-1.11.1.1208-bullseye-slim
+    container_name: logseq-db-sync
+    working_dir: /app
+    environment:
+      DB_SYNC_PORT: "8080"
+      DB_SYNC_BASE_URL: "http://localhost:8081"
+      DB_SYNC_DATA_DIR: "/data"
+      DB_SYNC_LOG_LEVEL: "info"
+      COGNITO_ISSUER: ""
+      COGNITO_CLIENT_ID: ""
+      JAVA_TOOL_OPTIONS: "-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true"
+      npm_config_nodedir: "/usr/local"
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+    volumes:
+      - .:/app
+      - ./docker-data/db-sync:/data
+    ports:
+      - "8081:8080"
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        apt-get update
+        apt-get install -y --no-install-recommends curl ca-certificates ca-certificates-java openssl xz-utils
+        update-ca-certificates -f
+        openssl s_client -showcerts -connect repo.clojars.org:443 -servername repo.clojars.org </dev/null 2>/dev/null | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' > /tmp/repo-clojars.pem
+        keytool -importcert -noprompt -alias repo-clojars -file /tmp/repo-clojars.pem -keystore "$${JAVA_HOME}/lib/security/cacerts" -storepass changeit || true
+        ARCH="$(dpkg --print-architecture)"
+        if [ "$$ARCH" = "arm64" ]; then NODE_ARCH="arm64"; else NODE_ARCH="x64"; fi
+        curl -kfsSL "https://nodejs.org/dist/v24.10.0/node-v24.10.0-linux-$${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz
+        tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1
+        rm -f /tmp/node.tar.xz
+        corepack enable
+        corepack prepare pnpm@10.33.0 --activate
+        pnpm --dir deps/db-sync install --frozen-lockfile || pnpm --dir deps/db-sync install
+        pnpm --dir deps/db-sync build:node-adapter
+        node deps/db-sync/worker/dist/node-adapter.js
+    restart: unless-stopped
